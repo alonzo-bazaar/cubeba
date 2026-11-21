@@ -1,0 +1,115 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+
+use Symbol;
+use IPC::Open2;
+use IPC::Open3;
+
+# using recipe at
+# https://www.oreilly.com/library/view/perl-cookbook/1565922433/ch07s14.html
+# mirrored at
+# https://users.softlab.ntua.gr/~sivann/books/OReilly%20Bookshelf/perl/cookbook/ch07_14.htm
+
+# we can determine that to to read from multple streams without blocking on
+# any of em we're gonna need the ternary select function.
+# https://perldoc.perl.org/functions/select#select-RBITS,WBITS,EBITS,TIMEOUT
+# (select/1 and select/4 are two rather different functions)
+# 
+# also, from the recipe
+# > Don't mix calls to four-argument select with calls to any of the buffered
+# > I/O functions listed in this chapter's Introduction
+# > (read, <>, seek, tell, etc.).
+# > Instead, you must use sysread  - and sysseek if you want to reposition the
+# > filehandle within the file.
+# docs for `sysread`:
+# https://perldoc.perl.org/functions/sysread#sysread-FILEHANDLE,SCALAR,LENGTH,OFFSET
+
+sub read_multiple {
+    my @handles = @_;   # params
+
+    # idfk, some configurable parameter
+    my $bufsize = 1024;
+    my $select_timeout = 1;
+
+    my @filenos = map { fileno($_) } @handles;
+
+    my @collected = map { '' } @handles;
+    my @offs = map { 0 } @handles;
+    # $collected[i] will be the collected output from $handle[i]
+    # $offs[i] will be the offset we're currently at in filehandle i
+    # (see comment above with using sysread)
+
+    my $filenos_mask = '';
+    foreach (@filenos) {
+        vec($filenos_mask, $_, 1) = 1;
+    }
+
+    my $done_mask = '';
+
+    print "kitemmuort\n";
+    print "$filenos_mask\n";
+    while ((not ($done_mask eq $filenos_mask))
+           and
+           (my $nfound = select(my $out = $filenos_mask,
+                                undef,
+                                undef,
+                                $select_timeout))) {
+        print "kitemmuort\n";
+        foreach my $i (0..$#handles) {
+            my $handle = $handles[$i];
+            my $fileno = $filenos[$i];
+
+            if (vec($out, $fileno, 1)) {
+                my $n_bytes_read = sysread($handle,
+                                           $collected[$i],
+                                           $bufsize,
+                                           $offs[$i]);
+                $offs[$i] += $n_bytes_read;
+                print "\nfuck\n$collected[$i]\nfuck\n";
+
+                # from the sysread documentation:
+                # > check for a return value of 0 to decide whether you're done.
+                if ($n_bytes_read == 0) {
+                    vec($done_mask, $fileno, 1) = 1;
+                }
+            }
+        }
+    }
+
+    return @collected;
+}
+
+# https://perldoc.perl.org/IPC::Open3
+sub run {
+    my @cmd = @_;
+    # command as string (for error reporting)
+    my $cmd_s = join ' ', map { $_ =~ /\s/ ? "'$_'" : $_ } @cmd;
+    my $pid = open3(my $CH_STDIN_FH,
+                    my $CH_STDOUT_FH,
+                    my $CH_STDERR_FH = gensym,
+                    @cmd);
+    close($CH_STDIN_FH) or die "could not close stdin of command [$cmd_s]: $!";
+    my ($ch_output, $ch_errput) = read_multiple($CH_STDOUT_FH, $CH_STDERR_FH);
+    close($CH_STDOUT_FH) or die "could not close stdin of command [$cmd_s]: $!";
+    close($CH_STDERR_FH) or die "could not close stdin of command [$cmd_s]: $!";
+    waitpid($pid, 0) or die "failed to wait on command [$cmd_s]: $!";
+    my $ch_exit_status = $? >> 8;
+    return ($ch_exit_status, $ch_output, $ch_errput);
+}
+
+my @cmd = ('ls', '-l', '.');
+# my $pid = open2(my $out, my $in, @cmd);
+# close($in);
+# local $/;
+# my $slup = <$out>;
+# waitpid($pid, 0);
+# print $? >> 8; print "\n";
+# print $slup; print "\n";
+# exit;
+
+
+my ($a, $b, $c) = run(@cmd);
+print "ret:\n$a\n";
+print "out:\n$b\n";
+print "err:\n$c\n";

@@ -1,0 +1,168 @@
+#!/usr/bin/env perl
+# "metadata"
+use strict;
+use warnings;
+use feature 'signatures';
+
+# imports
+use File::Basename;
+use Cwd qw(abs_path);
+use Env qw(HOME);
+
+use IPC::Open3;
+use Symbol qw(gensym); # serve per open3 ma non per open2
+
+# some setup things
+my $SCRIPT_DIR = dirname(abs_path($0));
+chdir $SCRIPT_DIR or die "could not chdir into $SCRIPT_DIR: $!";
+push @INC, '.';
+
+# docs per se va qualche cosa a puttane
+# il readme di frt-electronics
+# https://github.com/FRT-Electronics/
+# 
+# l'articolo di stm32 sulla cube cli
+# https://community.st.com/stm32-software-tools-165/introducing-stm32cubecli-your-stm32-toolchain-from-the-command-line-168704
+#
+# cube --help ma messo bellino come pagina e c'ha i link e roba
+# https://dev.st.com/stm32cube-docs/stm32cubecli/latest/en/docs/markup/STM32CubeCLI_Command_Reference.html
+
+# globals
+my $CUBE_ARTICLE_URL="https://community.st.com/stm32-software-tools-165/introducing-stm32cubecli-your-stm32-toolchain-from-the-command-line-168704";
+my $ELF_FILE_PATH="$SCRIPT_DIR/build/Debug/AMS.elf";
+my $CUBE_PROGRAMMER_BIN_DIR_PATH=dirname(abs_path(find_command_path('programmer')));
+my @REQUIRED_BUNDLES=qw(cmake stlink-gdbserver programmer);
+
+sub run(@cmd) {
+    # https://perldoc.perl.org/IPC::Open3
+    my $pid = open3(my $CMD_IN, my $CMD_OUT, my $CMD_ERR = gensym, @cmd);
+    close $CMD_IN;
+
+    # from `perldoc perlvar`
+    # searching for INPUT_RECORD_SEPARATOR:
+    # The input record separator, newline by default. This influences
+    # Perl's idea of what a "line" is. Works like awk's RS variable,
+    # including treating empty lines as a terminator if set to the
+    # null string
+    # [...]
+    # local $/;           # enable "slurp" mode
+    # local $_ = <FH>;    # whole file now here
+
+    # molto temporanea, non troppo safe, deadlockabile
+    local $/;
+    my $out = <$CMD_OUT>;
+    my $err = <$CMD_ERR>;
+    close $CMD_OUT;
+
+    # searching for CHILD_ERROR:
+    # The status returned by the last pipe close, backtick (``)
+    # command, successful call to wait() or waitpid(), or from the
+    # system() operator. This is just the 16-bit status word returned
+    # by the traditional Unix wait() system call (or else is made up
+    # to look like it). Thus, the exit value of the subprocess is
+    # really ($? >> 8), and "$? & 127" gives which signal, if any, the
+    # process died from, and "$? & 128" reports whether there was a
+    # core dump.
+    waitpid($pid, 0); my $ret = ($? >> 8);
+
+    return ($out, $err, $ret);
+}
+
+sub run_or_die(@cmd) {
+    my $s = join ' ', map { $_ =~ /\s/ ? "'$_'" : $_ } @cmd; # for error reporing
+    my ($out, $err, $ret) = run(@cmd);
+    ($ret == 0) or die "failed to run command [$s]: $!\n";
+}
+
+sub find_command_path($command) {
+    # example cube --resolve output
+    # $ cube --resolve programmer
+    # Command: '/home/nil/.local/share/stm32cube/bundles/programmer/2.23.0/bin/STM32_Programmer_CLI'
+    # <e altra roba che non ci serve>
+    # 
+    # we only want the /home/nil/...
+
+    my ($out, $err, $ret) = run('cube', '--resolve', $command) or die "cazzo";
+    return $out =~ /^\s*Command: '([^']+)'/ ? $1 : undef;
+}
+
+sub is_bundle_installed($bundle) {
+    my ($out, $err, $ret) = run('cube', '--resolve', $bundle);
+    return ($ret == 0);
+}
+
+sub install_bundle($bundle) {
+    run_or_die('cube', 'bundle', 'install', $bundle);
+}
+
+# roba di setup
+sub setup() {
+    my ($out, $err, $ret) = run('cube', '--version');
+    ($ret == 0) or die
+        join("\n", ("cube cli executable not found",
+                    "please install the damn thing before running this script",
+                    "see the following article from stm32 for more info",
+                    $CUBE_ARTICLE_URL));
+         
+    run_or_die('cube', 'bundle', 'install', '--project');
+
+    foreach my $req (@REQUIRED_BUNDLES) {
+        if(not is_bundle_installed($req)) {
+             install_bundle($req);
+        }
+    }
+}
+
+sub build() {
+    run_or_die('cube', 'cmake', '--build', '--preset', 'Debug');
+}
+
+# flasha roba
+sub programmer() {
+    run_or_die('cube', 'programmer',
+               '-c',
+               'port=SWD',
+               'mode=NORMAL',
+               '-w', $ELF_FILE_PATH,
+               '-v',
+               '-rst');
+}
+
+sub debugger_server() {
+    run_or_die('cube', 'stlink-gdbserver',
+               '-d',
+               '--frequency', '1000',
+               '-p', '3333',
+               '-s',
+               '-cp', $CUBE_PROGRAMMER_BIN_DIR_PATH);
+}
+
+sub main(@argv) {
+    setup();
+    if(not $#argv) {
+        print "no flags provided, just building...";
+        build();
+        return;
+    }
+
+    my ($exe_name, $first_flag, @sticazzi) = @argv;
+    $first_flag = uc($first_flag)
+    if( dc($first_flag) =~ /^-*build$/i) {
+        print "building...\n";
+        build();
+    }
+    elsif( dc($first_flag) =~ /^-*(prog|flash)/i) {
+        print "flashing...\n";
+        programmer();
+    }
+    elsif( dc($first_flag) =~ /^-*(debug|dbg)/i) {
+        print "running debugger server...\n";
+        debugger_server();
+    }
+    else {
+        print "no recognized flags provided, just building...";
+        build();
+    }
+}
+
+main(@ARGV);
