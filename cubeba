@@ -1,0 +1,247 @@
+#!/usr/bin/env perl
+# "metadata"
+use strict;
+use warnings;
+use feature 'signatures';
+
+# imports
+use File::Basename ('dirname');  # to find $SCRIPT_DIR
+use Cwd            ('abs_path'); # to find $SCRIPT_DIR
+
+use IPC::Open3 ('open3'); # https://perldoc.perl.org/IPC::Open3
+                          # we use the open3 function to spawn a
+                          # subprocess and immediately grab its
+                          # stdin, stdout, and stderr
+                          # to control *everything* that comes out of
+                          # the cube cli
+
+use Symbol ('gensym'); # open3 will automatically create handles for
+                       # the subprocess stdin and stdout, but not stderr
+                       # to create the stderr handle we use gensym
+
+# setup
+# (make sure script's CWD is the same as the dir script is in)
+my $SCRIPT_DIR = dirname(abs_path($0));
+chdir $SCRIPT_DIR or die "could not chdir into [$SCRIPT_DIR]: $!";
+
+my $LOG_DIR      = "$SCRIPT_DIR/.cubeba/log";
+my $PROJECT_FILE = "$SCRIPT_DIR/.cubeba/project.json";
+
+my $VERBOSE = grep { $_ eq '-v' } @ARGV;
+sub log(@shit) {
+    if ($VERBOSE) {
+        print("[$0] ".join(' ', @shit)."\n");
+    }
+}
+
+# docs
+# frt electronics readme readme
+# https://github.com/FRT-Electronics/
+# 
+# article for the stm32 cube cli
+# https://community.st.com/stm32-software-tools-165/introducing-stm32cubecli-your-stm32-toolchain-from-the-command-line-168704
+#
+# this is basically cube --help but rendered in html
+# https://dev.st.com/stm32cube-docs/stm32cubecli/latest/en/docs/markup/STM32CubeCLI_Command_Reference.html
+
+# globals
+my $CUBE_ARTICLE_URL="https://community.st.com/stm32-software-tools-165/introducing-stm32cubecli-your-stm32-toolchain-from-the-command-line-168704";
+my $ELF_FILE_PATH="$SCRIPT_DIR/build/Debug/AMS.elf";
+my $CUBE_PROGRAMMER_BIN_DIR_PATH=dirname(abs_path(find_command_path('programmer')));
+my @REQUIRED_BUNDLES=qw(cmake stlink-gdbserver programmer);
+
+# read multiple handles without blocking
+# using recipe at
+# https://www.oreilly.com/library/view/perl-cookbook/1565922433/ch07s14.html
+# and mirrored at
+# https://users.softlab.ntua.gr/~sivann/books/OReilly%20Bookshelf/perl/cookbook/ch07_14.htm
+#
+# we can determine that to to read from multple streams without blocking on
+# any of em we're gonna need the 4 argument select function.
+# https://perldoc.perl.org/functions/select#select-RBITS,WBITS,EBITS,TIMEOUT
+# (select/1 and select/4 are two *very* different functions)
+# 
+# quoting from the same recipe
+# > Don't mix calls to four-argument select with calls to any of the buffered
+# > I/O functions listed in this chapter's Introduction
+# > (read, <>, seek, tell, etc.).
+# > Instead, you must use sysread  - and sysseek if you want to reposition the
+# > filehandle within the file.
+# so we're gonna need `sysread` as well
+# https://perldoc.perl.org/functions/sysread#sysread-FILEHANDLE,SCALAR,LENGTH,OFFSET
+
+sub read_multiple(@handles) {
+    # how much are we gonna read per sysread
+    my $bufsize = 1024;
+    # no timeout: block until something becomes available
+    my $select_timeout = undef;
+
+    my @filenos = map { fileno($_) } @handles;
+
+    my @collected = map { '' } @handles;
+    my @offs = map { 0 } @handles;
+    # $collected[i] will be the collected output from $handle[i]
+    # $offs[i] will be the offset we're currently at in filehandle i
+    # (see comment above with using sysread)
+
+    my $filenos_mask = '';
+    foreach (@filenos) { vec($filenos_mask, $_, 1) = 1; }
+
+    while ($nfound = select(my $out = $filenos_mask,
+                                undef,
+                                undef,
+                                $select_timeout)) {
+        foreach my $i (0..$#handles) {
+            my $handle = $handles[$i];
+            my $fileno = $filenos[$i];
+
+            if (vec($out, $fileno, 1)) {
+                my $n_bytes_read = sysread($handle,
+                                           $collected[$i],
+                                           $bufsize,
+                                           $offs[$i]) or die "sysread failed: $!";
+
+                $offs[$i] += $n_bytes_read;
+                # from the sysread documentation, there's no eof signal or the
+                # like, if sysread returns 0 that's your eof (sure ig)
+                #
+                # remove from candidate filenos instead of keeping a done_mask
+                # to avoid spinning on an eof but technically ready file
+                if ($n_bytes_read == 0) {
+                    vec($filenos_mask, $fileno, 1) = 0;
+                }
+            }
+        }
+    }
+
+    return @collected;
+}
+
+# command as string (for error reporting)
+sub stringify_cmd(@cmd) {
+    return join ' ', map { $_ =~ /\s/ ? "'$_'" : $_ } @cmd;
+}
+
+sub run(@cmd) {
+    my $cmd_s = stringify_cmd(@cmd);
+    log("running command: [$cmd_s]");
+    my $pid = open3(my $CH_STDIN_FH,
+                    my $CH_STDOUT_FH,
+                    my $CH_STDERR_FH = gensym,
+                    @cmd);
+    close($CH_STDIN_FH) or die "could not close stdin of command [$cmd_s]: $!";
+    my ($ch_output, $ch_errput) = read_multiple($CH_STDOUT_FH, $CH_STDERR_FH);
+    close($CH_STDOUT_FH) or die "could not close stdin of command [$cmd_s]: $!";
+    close($CH_STDERR_FH) or die "could not close stdin of command [$cmd_s]: $!";
+    waitpid($pid, 0) or die "failed to wait on command [$cmd_s]: $!";
+    my $ch_exit_status = $? >> 8;
+    return ($ch_exit_status, $ch_output, $ch_errput);
+}
+
+sub run_or_die(@cmd) {
+    my $cmd_s = stringify_cmd(@cmd);
+    log("run or die: [$cmd_s]");
+    my ($ret, $err, $out) = run(@cmd);
+    if ($ret != 0) {
+        die "failed to run command [$cmd_s]: $!\n";
+    }
+    return ($out, $err, $ret);
+}
+
+sub find_command_path($command) {
+    # example output of a `cube --resolve` command
+    # $ cube --resolve programmer
+    # Command: '/home/nil/.local/share/stm32cube/bundles/programmer/2.23.0/bin/STM32_Programmer_CLI'
+    # <and some more shit>
+    # 
+    # we only want the command path, so /home/nil/...
+    log("looking for cube command: [$command]");
+    my ($ret, $err, $out) = run_or_die('cube', '--resolve', $command);
+    return $out =~ /^\s*Command: '([^']+)'/ ? $1 : undef;
+}
+
+sub is_bundle_installed($bundle) {
+    log("looking for cube bundle: [$bundle]");
+    my ($ret, $err, $out) = run('cube', '--resolve', $bundle);
+    return ($ret == 0);
+}
+
+sub install_bundle($bundle) {
+    log("installing cube bundle: [$bundle]");
+    run_or_die('cube', 'bundle', 'install', $bundle);
+}
+
+# roba di setup
+sub setup() {
+    log("setup");
+    my ($out, $err, $ret) = run('cube', '--version');
+    ($ret == 0) or die
+        join("\n", ("cube cli executable not found",
+                    "please install the damn thing before running this script",
+                    "see the following article from stm32 for more info",
+                    $CUBE_ARTICLE_URL));
+         
+    log("installing project bundles (if not present)");
+    run_or_die('cube', 'bundle', 'install', '--project');
+
+    log("installing some extra required bundles");
+    foreach my $req (@REQUIRED_BUNDLES) {
+        if(not is_bundle_installed($req)) {
+             install_bundle($req);
+        }
+    }
+}
+
+sub build() {
+    log("building");
+    run_or_die('cube', 'cmake', '--build', '--preset', 'Debug');
+}
+
+# flasha roba
+sub programmer() {
+    log("flashing");
+    run_or_die('cube', 'programmer',
+               '-c',
+               'port=SWD',
+               'mode=NORMAL',
+               '-w', $ELF_FILE_PATH,
+               '-v',
+               '-rst');
+}
+
+sub debugger_server() {
+    log("debugger server");
+    run_or_die('cube', 'stlink-gdbserver',
+               '-d',
+               '--frequency', '1000',
+               '-p', '3333',
+               '-s',
+               '-cp', $CUBE_PROGRAMMER_BIN_DIR_PATH);
+}
+
+sub main(@argv) {
+    setup();
+    if(not $#argv) {
+        log("no flags provided, just building");
+        build();
+        return;
+    }
+
+    my ($exe_name, $first_flag, @sticazzi) = @argv;
+    $first_flag = uc($first_flag)
+    if( $first_flag =~ /^-*build$/i) {
+        build();
+    }
+    elsif( $first_flag =~ /^-*(prog|flash)/i) {
+        programmer();
+    }
+    elsif( $first_flag =~ /^-*(debug|dbg)/i) {
+        debugger_server();
+    }
+    else {
+        log("no recognized flags provided, just building");
+        build();
+    }
+}
+
+main(@ARGV);
