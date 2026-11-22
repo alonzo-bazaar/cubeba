@@ -1,35 +1,35 @@
 #!/usr/bin/env perl
-# "metadata"
 use strict;
 use warnings;
 use feature 'signatures';
 
 # setup shit
-use File::Basename ('dirname');
-use Cwd            ('abs_path');
-my $SCRIPT_DIR = dirname(abs_path($0));
-chdir $SCRIPT_DIR or die "could not chdir into [$SCRIPT_DIR]: $!";
+my $SCRIPT_DIR = path_dir($0);
+chdir $SCRIPT_DIR
+    or die "could not chdir into project directory [$SCRIPT_DIR]: $!";
 
-use IPC::Open3 ('open3'); # https://perldoc.perl.org/IPC::Open3
-                          # we use the open3 function to spawn a
-                          # subprocess and immediately grab its
-                          # stdin, stdout, and stderr
-                          # to control *everything* that comes out of
-                          # the cube cli
+# path_dir and path_file will be implemented using these
+# File::Spec is a bit less janky than the default basename and dirname functions
+use File::Spec::Functions ('splitpath', 'rel2abs');
 
-use Symbol ('gensym'); # open3 will automatically create handles for
-                       # the subprocess stdin and stdout, but not stderr
-                       # to create the stderr handle we use gensym
+# https://perldoc.perl.org/IPC::Open3
+# we use the open3 function to spawn a subprocess and immediately grab handles to
+# its stdin, stdout, and stderr, so we can capture *everything* that comes out of
+# the cube cli, and be as selective as possible in what to show to the user
+use IPC::Open3 ('open3');
+                         
+# open3 will automatically create handles for the subprocess
+# stdin and stdout, but not stderr, so we need gensym to create the stderr handle
+# (don't ask me how this works, idfk)
+use Symbol ('gensym'); 
 
 # https://perldoc.perl.org/List::Util
 use List::Util ('max', 'any', 'none');
 
-# global and configuration variables
-# TODO: find a way to derive project name instead of hardcoding it
-# (could I steal this from the cmake?)
-# (or perhaps make it a thing the user passes in)
-my $PROJECT_NAME='AMS';
-my @REQUIRED_BUNDLES=('cmake', 'stlink-gdbserver', 'programmer');
+# this is just how you import environment variables in perl
+# if CUBEBA_PROJECT does not exist in the environment then the $CUBEBA_PROJECT
+# variable will be falsey
+use Env ('CUBEBA_PROJECT');
 
 # url to print at the user as a nice ol' RTFM
 my $CUBE_ARTICLE_URL  = 'https://community.st.com/stm32-software-tools-165/introducing-stm32cubecli-your-stm32-toolchain-from-the-command-line-168704';
@@ -38,21 +38,36 @@ my $CUBE_CLI_HELP_URL = 'https://dev.st.com/stm32cube-docs/stm32cubecli/latest/e
 # (must be in the organization to see the readme)
 # https://github.com/FRT-Electronics/
 
-my $VERBOSE =  any { flag_present($_) } ('-v', '--verbose');
-my $TARGET  = (any { flag_present($_) } ('-r', '--release'))
+my $VERBOSE =  any { is_flag_present($_) } ('-v', '--verbose');
+my $TARGET  = (any { is_flag_present($_) } ('-r', '--release'))
     ? 'Release'
     : 'Debug';
+
+my $PROJECT_NAME=find_project_name();
+my @REQUIRED_BUNDLES=('cmake', 'stlink-gdbserver', 'programmer');
+
 my $ELF_FILE_PATH  = "$SCRIPT_DIR/build/$TARGET/$PROJECT_NAME.elf";
 
 my $CUBE_PROGRAMMER_BIN_DIR_PATH; # will be set to
-                                  # dirname(abs_path(find_command_path('programmer')));
+                                  # path_dir(find_command_path('programmer'));
                                   # but only after we make sure the 'programmer'
-                                  # bundle is actually installed
-                                  # (see the `setup` function)
+                                  # bundle is actually installed.
+                                  # we set it at the end of the `setup` function
 
 # utils
-sub flag_present($target) { return scalar(grep { $_ eq $target } @ARGV); }
-
+sub path_dir ($path) {
+    # `dirname` but less janky
+    my ($volume, $dir, $file) = splitpath(rel2abs($path));
+    return $dir;
+}
+sub path_file ($path) {
+    # `basename` but less janky
+    my ($volume, $dir, $file) = splitpath(rel2abs($path));
+    return $file;
+}
+sub is_flag_present($target) {
+    return scalar(grep { $_ eq $target } @ARGV);
+}
 # naming this `log` conflicted with perl's builtin `log` (logarithm) function
 # I should come up with a better name, but not now
 sub loggeroni(@shit) {
@@ -60,15 +75,46 @@ sub loggeroni(@shit) {
     if ($VERBOSE) { print "$logged_line\n"; }
     # todo: put log line into a log file
 }
+sub find_project_name() {
+    loggeroni("finding project name");
+    # try finding project name using the following procedure
+    # - use the CUBEBA_PROJECT environment variable if it is set
+    # - otherwise
+    #   + look for any .ioc files in the project root directory.
+    #     we expect the ./cubeba to be in that directory so we're gonna
+    #     treat $SCRIPT_DIR as the project directory
+    #   + ensure there is only one such file (ie: `or die`)
+    #   + remove the .ioc at the end and use that
 
-# we wrangle bitmasks with `vec` and shit for the `read_multiple` function
+    if($CUBEBA_PROJECT) {
+        loggeroni("deriving project name from environment variable CUBEBA_PROJECT");
+        loggeroni("project name is $CUBEBA_PROJECT");
+        return $CUBEBA_PROJECT;
+    }
+
+    # glob returns a list of all paths matching that glob
+    my @ioc_file_paths = glob("$SCRIPT_DIR/*.ioc");
+    if (scalar(@ioc_file_paths) == 0) {
+        die "no .ioc file found in project directory $SCRIPT_DIR";
+    }
+    if (scalar(@ioc_file_paths) > 1) {
+        die "more than one .ioc file found in project directory $SCRIPT_DIR";
+    }
+
+    my $project_ioc_filename = path_file($ioc_file_paths[0]);
+    my $project_name = (split /\./, $project_ioc_filename)[0];
+    loggeroni("deriving project name from environment .ioc file in project directory");
+    loggeroni("project name is $project_name");
+    return $project_name;
+}
+
+# in the `read_multiple` function we wrangle bitmasks with `vec` and shit
 # https://perldoc.perl.org/functions/vec
 # and we need a way to check that the bitmask is all zero
-# idk if there's a builtin function to do this, well, fuck it
+# idk if there's a builtin function to do this, but rolling this was quick enough
 sub is_bitmask_zero($mask, $size) {
     return none { vec($mask, $_, 1) } 0..$size;
 }
-
 # read multiple handles without blocking
 # based on the following recipe from the perl cookbok
 # https://www.oreilly.com/library/view/perl-cookbook/1565922433/ch07s14.html
@@ -146,7 +192,7 @@ sub read_multiple(@handles) {
     return @collected;
 }
 
-# render command as string (for error reporting)
+# render shell command as string (for error reporting)
 sub stringify_cmd(@cmd) {
     return join ' ', map { $_ =~ /\s/ ? "'$_'" : $_ } @cmd;
 }
@@ -220,7 +266,7 @@ sub setup() {
         }
     }
 
-    $CUBE_PROGRAMMER_BIN_DIR_PATH=dirname(abs_path(find_command_path('programmer')));
+    $CUBE_PROGRAMMER_BIN_DIR_PATH=path_dir(find_command_path('programmer'));
 }
 
 sub build() {
