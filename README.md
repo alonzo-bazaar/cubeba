@@ -44,7 +44,7 @@ Just change that to your own project's name and voila this shit isn't big enough
 > I should probably do that tbh
 
 # namesake
-cubeba is named after how https://en.wikipedia.org/wiki/Kibbeh is called in egyptian arabic (*kobeba*).  
+cubeba is named after how [kibbeh](https://en.wikipedia.org/wiki/Kibbeh) (a kind of meatball) is called in egyptian arabic (*kobeba*).  
 I needed a pun with `cube` and [qbert](https://en.wikipedia.org/wiki/Q*bert) was too obious
 
 
