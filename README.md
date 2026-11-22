@@ -32,7 +32,7 @@ The `-v` and `--verbose` flags can also be passed to get a log of everything `cu
 `cubeba` will try to automatically detect the project's name by looking for any `.ioc` files present in the same directory as itself.
 Note this will only work if there is one and only one `.ioc` file in the project root, also note that some weird shit may go down if the `.ioc` file has a different name from that of your project.
 
-Now, if for whatever reason, your project's name is different from the name of any `.ioc` file in the project root, and/or you have multiple `.ioc` files in the project root, you can still use `cubeba` in the project by setting the `CUBEBA_PROJECT` environment variable before you run `cubeba`, if this environment variable is set `cubeba` will skip any check on `.ioc` files and whatnot, and just use the value of `CUBEBA_PROJECT` to determine the project name.
+Now, if for whatever reason, your project's name is different from the name of any `.ioc` file in the project root, and/or you have multiple `.ioc` files in the project root, you can still use `cubeba` in the project by setting the `CUBEBA_PROJECT` environment variable before you run `cubeba`, if this environment variable is set `cubeba` will skip any check on `.ioc` files and whatnot, and just use the value of `CUBEBA_PROJECT` as the project name.
 
 # namesake
 `cubeba` is named after how [kibbeh](https://en.wikipedia.org/wiki/Kibbeh) (a kind of meatball) is called in egyptian arabic (*kobeba*).  
