@@ -260,13 +260,13 @@ sub main() {
     }
 
     my $command = $ARGV[0];
-    if ($command =~ /^-*b(uild)?$/i) {
+    if ($command eq 'build') {
         build();
     }
-    elsif ($command =~ /^-*(p(rog)?|f(lash)?)$/i) {
+    elsif ($command eq 'flash') {
         programmer();
     }
-    elsif ($command =~ /^-*(d(ebug)?|d(bg)?)$/i) {
+    elsif ($command eq 'debug') {
         debugger_server();
     }
     else {
